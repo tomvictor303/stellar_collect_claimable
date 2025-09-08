@@ -1,0 +1,3 @@
+stellar_sdk
+alive_progress
+colorama
