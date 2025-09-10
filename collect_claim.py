@@ -1,101 +1,97 @@
-from stellar_sdk import Server, Keypair, TransactionBuilder, Network, ClaimClaimableBalance
-from alive_progress import alive_bar
+from stellar_sdk import *
 import requests
-import colorama
+import os
+from alive_progress import alive_bar
 
-# Account configuration
-account_keypair = Keypair.from_secret('')
-account_public  = account_keypair.public_key
-account_secret  = account_keypair.secret
+server = Server(horizon_url="https://horizon.stellar.org")
+network_passphrase = Network.PUBLIC_NETWORK_PASSPHRASE
 
-# Stellar server
-server = Server(horizon_url='https://horizon.stellar.org')
+# Load distributor secret from environment variable
+distributor_secret = os.getenv("DISTRIBUTOR_SECRET_KEY")
+if not distributor_secret:
+    raise Exception("DISTRIBUTOR_SECRET_KEY environment variable is not set!")
 
-# Fetch claimable balances
-def get_claimable_balances_for_account(account_id):
-    """Fetch all claimable balances where account_id is the sponsor."""
-    claimable_records = []
-    url = f"{server.horizon_url}/claimable_balances?sponsor={account_id}&limit=200"
+distributor_keypair = Keypair.from_secret(distributor_secret)
+distributor_public = distributor_keypair.public_key
 
-    while url:
-        try:
-            response = requests.get(url)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as e:
-            print("Error fetching claimable balances:", e)
-            continue
+###################################################################################
+# Utility: Split into chunks
+###################################################################################
+def Chunker(seq, size):
+    return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
-        claimable_records.extend(data['_embedded']['records'])
-        next_url = data['_links']['next']['href']
+###################################################################################
+# SendTransactions (reused from your code)
+###################################################################################
+def SendTransactions(operations):
+    if len(operations) == 0:
+        return
 
-        # Stop if next cursor equals current cursor
-        if 'cursor=' in next_url and 'cursor=' in url:
-            if next_url.split('cursor=')[1].split('&')[0] == url.split('cursor=')[1].split('&')[0]:
-                break
+    try:
+        TransactionBuild = TransactionBuilder(
+            source_account=server.load_account(distributor_public),
+            network_passphrase=network_passphrase,
+            base_fee=20000
+        )
 
-        url = next_url if next_url != url else None
+        for op in operations:
+            TransactionBuild.append_operation(op)
 
-    return claimable_records
+        TransactionBuild.set_timeout(120)
+        transaction = TransactionBuild.build()
+        transaction.sign(distributor_keypair)
 
-def get_claimable_balance_ids(account_id):
-    """Return a list of claimable balance IDs for a given account."""
-    return [data['id'] for data in get_claimable_balances_for_account(account_id)]
+        server.submit_transaction(transaction)
+        print("Transaction successfully submitted.")
 
-# -----------------------------
-# Collect claimable balances
-# -----------------------------
-def collect_claimable_balances(account_secret, balances, progress_bar=None):
-    """Claim balances for the given secret key in batches of 100."""
-    keypair = Keypair.from_secret(account_secret)
-    public_key = keypair.public_key
+    except Exception as e:
+        print(f"Transaction failed: {e}")
 
-    for i in range(0, len(balances), 100):
-        batch = balances[i:i+100]
-        fee = server.fetch_base_fee()
+###################################################################################
+# Claimable Balances Logic
+###################################################################################
+def GetClaimableBalances(distributor_public):
+    url = f"https://horizon.stellar.org/claimable_balances?claimant={distributor_public}&limit=200"
+    response = requests.get(url)
+    response.raise_for_status()
+    records = response.json()['_embedded']['records']
 
-        while True:
-            tx_builder = TransactionBuilder(
-                source_account=server.load_account(public_key),
-                network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
-                base_fee=fee
-            )
+    balance_ids = []
+    for record in records:
+        balance_ids.append(record['id'])
+    return balance_ids
 
-            for balance_id in batch:
-                tx_builder.append_operation(ClaimClaimableBalance(balance_id=balance_id, source=public_key))
+def ReclaimBalances(balance_ids):
+    operations = []
+    for bid in balance_ids:
+        op = ClaimClaimableBalance(balance_id=bid)
+        operations.append(op)
 
-            if not tx_builder.operations:
-                break
+    print(f"Starting reclaim of {len(operations)} balances...")
+    with alive_bar(len(operations), title='Reclaiming Balances') as bar:
+        for chunk in Chunker(operations, 100):
+            SendTransactions(chunk)
+            bar(len(chunk))
 
-            tx_builder.set_timeout(120)
-            transaction = tx_builder.build()
-            transaction.sign(account_secret)
+def AutoReclaimExpiredBalances():
+    print("Checking for expired claimable balances...")
+    try:
+        balance_ids = GetClaimableBalances(distributor_public)
+        if not balance_ids:
+            print("No claimable balances to reclaim.")
+            return
 
-            try:
-                server.submit_transaction(transaction)
-            except Exception as error:
-                print("Transaction error:", error)
-            else:
-                if progress_bar:
-                    progress_bar(len(batch))
-                break
+        print(f"Found {len(balance_ids)} reclaimable balances.")
+        ReclaimBalances(balance_ids)
+        print("Reclaim finished.")
+    except Exception as e:
+        print(f"Error while reclaiming balances: {e}")
 
-# -----------------------------
-# Main collection loop
-# -----------------------------
-def main_collect(account_secret):
-    """Main loop to collect all claimable balances for an account."""
-    balances = get_claimable_balance_ids(Keypair.from_secret(account_secret).public_key)
-    with alive_bar(len(balances), title=colorama.Fore.LIGHTGREEN_EX + 'Collecting:', bar='blocks') as bar:
-        collect_claimable_balances(account_secret, balances, bar)
+###################################################################################
+# Main logic (run on demand)
+###################################################################################
+def Main():
+    AutoReclaimExpiredBalances()
 
-        while True:
-            balances = get_claimable_balance_ids(Keypair.from_secret(account_secret).public_key)
-            if not balances:
-                break
-            collect_claimable_balances(account_secret, balances, bar)
-
-# -----------------------------
-# Usage
-# -----------------------------
-main_collect(account_secret)
+if __name__ == "__main__":
+    Main()
