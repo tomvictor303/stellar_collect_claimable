@@ -164,9 +164,12 @@ def GetClaimableBalances(distributor_public):
                 if claimant['destination'] == distributor_public:
                     if is_predicate_true(claimant.get('predicate', {})):
                         balance_ids.append(record['id'])
-        url = data['_links'].get('next', {}).get('href')
-        if url == f"https://horizon.stellar.org/claimable_balances?claimant={distributor_public}&limit=200":
-            break  # stop if next is same as current
+        next_url = data['_links'].get('next', {}).get('href')
+        self_url = data['_links'].get('next', {}).get('href')
+        if next_url == self_url or not next_url:
+            break  # stop if next is same as current or invalid url
+        # Now, set url to the next url
+        url = next_url
     return balance_ids
 
 def ReclaimBalances(balance_ids):
