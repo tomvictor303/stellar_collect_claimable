@@ -1,5 +1,6 @@
 from stellar_sdk import *
 import requests
+import time
 import os
 from dotenv import load_dotenv
 from alive_progress import alive_bar
@@ -26,8 +27,12 @@ def Chunker(seq, size):
 ###################################################################################
 # SendTransactions (reused from your code)
 ###################################################################################
-def SendTransactions(operations):
+def SendTransactions(operations, retry_count=0, max_retries=5):
     if len(operations) == 0:
+        return
+	
+    if retry_count >= max_retries:
+        print("Max retries reached. Aborting transaction.")
         return
 
     try:
@@ -48,7 +53,73 @@ def SendTransactions(operations):
         print("Transaction successfully submitted.")
 
     except Exception as e:
-        print(f"Transaction failed: {e}")
+        if hasattr(e, 'status') and e.status == 504:
+            print("504 Gateway Timeout. Retrying...")
+            time.sleep(5)  # Delay before retrying
+            SendTransactions(operations, retry_count + 1)
+        elif (
+            hasattr(e, 'extras') and 
+            e.extras is not None and 
+            isinstance(e.extras.get('result_codes'), dict) and 
+            e.extras['result_codes'].get('transaction') == 'tx_bad_seq'
+		):
+            print("Bad sequence number. Reloading account and retrying...")
+            time.sleep(1)  # Brief delay before retrying
+            SendTransactions(operations, retry_count + 1)
+        elif (
+            hasattr(e, 'extras') and 
+            e.extras is not None and 
+            isinstance(e.extras.get('result_codes'), dict) and 
+            e.extras['result_codes'].get('transaction') == 'tx_too_late'
+        ):
+            print("Transaction time out. Retrying...")
+            time.sleep(1)  # Brief delay before retrying
+            SendTransactions(operations, retry_count + 1)
+        elif (
+            hasattr(e, 'extras') and 
+            e.extras is not None and 
+            isinstance(e.extras.get('result_codes'), dict) and 
+            e.extras['result_codes'].get('transaction') == 'tx_insufficient_fee'
+        ):
+            print("Gas Fee is too high now. Retrying after 5 seconds ...")
+            time.sleep(5)  # Brief delay before retrying
+            SendTransactions(operations, retry_count + 1) 
+        elif (
+            hasattr(e, 'extras') and 
+            e.extras is not None and 
+            isinstance(e.extras.get('result_codes'), dict) and 
+            e.extras['result_codes'].get('transaction') == 'tx_failed' and 
+            e.extras['result_codes'].get('operations') and 
+            len(e.extras['result_codes'].get('operations')) > 0
+        ):
+            # BEGIN operations_error_check			
+            ops = e.extras['result_codes']['operations']
+            # BEGIN operations_error_check_REMOVE_OUT_op_no_trust
+            if 'op_no_trust' in ops:
+                indexes=[]
+                for index, value in enumerate(ops):
+                    if value == 'op_no_trust':
+                        indexes.append(index)
+                    
+                for index in sorted(indexes, reverse=True):
+                    del operations[index]
+
+                if len(operations) > 0:
+                    SendTransactions(operations, retry_count + 1)
+                else:
+                    error_message = f"Transaction failed: Receiver accounts did not set Trust line with asset"
+                    print(error_message)
+			# END operations_error_check_REMOVE_OUT_op_no_trust
+            elif 'op_underfunded' in ops:				
+                error_message = f"Transaction failed: token amount is insufficient in distribution account."
+                print(error_message)
+            else:				
+                error_message = f"Transaction failed: {e}"
+                print(error_message)
+			# END operations_error_check
+        else:
+            error_message = f"Transaction failed: {e}"
+            print(error_message)
 
 ###################################################################################
 # Claimable Balances Logic
