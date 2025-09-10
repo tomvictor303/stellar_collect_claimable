@@ -122,18 +122,24 @@ def SendTransactions(operations, retry_count=0, max_retries=5):
             print(error_message)
 
 ###################################################################################
-# Claimable Balances Logic
+# Claimable Balances Logic (only expired balances)
 ###################################################################################
-def GetClaimableBalances(distributor_public):
+def GetExpiredClaimableBalances(distributor_public):
     url = f"https://horizon.stellar.org/claimable_balances?claimant={distributor_public}&limit=200"
     response = requests.get(url)
     response.raise_for_status()
     records = response.json()['_embedded']['records']
 
-    balance_ids = []
+    expired_ids = []
     for record in records:
-        balance_ids.append(record['id'])
-    return balance_ids
+        for claimant in record['claimants']:
+            if claimant['destination'] != distributor_public:
+                continue
+            predicate = claimant['predicate']
+            # Check if this is a NOT predicate
+            if 'not' in predicate:
+                expired_ids.append(record['id'])
+    return expired_ids
 
 def ReclaimBalances(balance_ids):
     operations = []
@@ -150,7 +156,7 @@ def ReclaimBalances(balance_ids):
 def AutoReclaimExpiredBalances():
     print("Checking for expired claimable balances...")
     try:
-        balance_ids = GetClaimableBalances(distributor_public)
+        balance_ids = GetExpiredClaimableBalances(distributor_public)
         if not balance_ids:
             print("No claimable balances to reclaim.")
             return
