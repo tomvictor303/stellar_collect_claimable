@@ -141,11 +141,11 @@ def is_predicate_true(predicate):
     if 'not' in predicate:
         return not is_predicate_true(predicate['not'])
 
-    if 'before' in predicate:
-        return time.time() < predicate['before']
+    if 'abs_before_epoch' in predicate:
+        return time.time() < int(predicate['abs_before_epoch'])
 
-    if 'after' in predicate:
-        return time.time() > predicate['after']
+    if 'abs_after_epoch' in predicate:
+        return time.time() > int(predicate['abs_after_epoch'])
 
     return False  # fallback for unknown predicate
 
