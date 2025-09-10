@@ -1,7 +1,10 @@
 from stellar_sdk import *
 import requests
 import os
+from dotenv import load_dotenv
 from alive_progress import alive_bar
+
+load_dotenv()  # This reads the .env file
 
 server = Server(horizon_url="https://horizon.stellar.org")
 network_passphrase = Network.PUBLIC_NETWORK_PASSPHRASE
