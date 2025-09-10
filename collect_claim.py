@@ -122,24 +122,52 @@ def SendTransactions(operations, retry_count=0, max_retries=5):
             print(error_message)
 
 ###################################################################################
-# Claimable Balances Logic (only expired balances)
+# Predicate check
 ###################################################################################
-def GetExpiredClaimableBalances(distributor_public):
-    url = f"https://horizon.stellar.org/claimable_balances?claimant={distributor_public}&limit=200"
-    response = requests.get(url)
-    response.raise_for_status()
-    records = response.json()['_embedded']['records']
+def is_predicate_true(predicate):
+    """Return True if predicate allows claim now."""
+    if not predicate:
+        return True  # empty predicate is unconditional
 
-    expired_ids = []
-    for record in records:
-        for claimant in record['claimants']:
-            if claimant['destination'] != distributor_public:
-                continue
-            predicate = claimant['predicate']
-            # Check if this is a NOT predicate
-            if 'not' in predicate:
-                expired_ids.append(record['id'])
-    return expired_ids
+    if predicate.get('unconditional', False):
+        return True
+
+    if 'and' in predicate:
+        return all(is_predicate_true(p) for p in predicate['and'])
+
+    if 'or' in predicate:
+        return any(is_predicate_true(p) for p in predicate['or'])
+
+    if 'not' in predicate:
+        return not is_predicate_true(predicate['not'])
+
+    if 'before' in predicate:
+        return time.time() < predicate['before']
+
+    if 'after' in predicate:
+        return time.time() > predicate['after']
+
+    return False  # fallback for unknown predicate
+
+###################################################################################
+# Fetch claimable balances for distributor
+###################################################################################
+def GetClaimableBalances(distributor_public):
+    balance_ids = []
+    url = f"https://horizon.stellar.org/claimable_balances?claimant={distributor_public}&limit=200"
+    while url:
+        resp = requests.get(url)
+        resp.raise_for_status()
+        data = resp.json()
+        for record in data['_embedded']['records']:
+            for claimant in record['claimants']:
+                if claimant['destination'] == distributor_public:
+                    if is_predicate_true(claimant.get('predicate', {})):
+                        balance_ids.append(record['id'])
+        url = data['_links'].get('next', {}).get('href')
+        if url == f"https://horizon.stellar.org/claimable_balances?claimant={distributor_public}&limit=200":
+            break  # stop if next is same as current
+    return balance_ids
 
 def ReclaimBalances(balance_ids):
     operations = []
@@ -156,7 +184,7 @@ def ReclaimBalances(balance_ids):
 def AutoReclaimExpiredBalances():
     print("Checking for expired claimable balances...")
     try:
-        balance_ids = GetExpiredClaimableBalances(distributor_public)
+        balance_ids = GetClaimableBalances(distributor_public)
         if not balance_ids:
             print("No claimable balances to reclaim.")
             return
